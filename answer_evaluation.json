@@ -1,0 +1,545 @@
+{
+    "name": "Exam System - Answer Evaluation",
+    "nodes": [
+        {
+            "parameters": {
+                "httpMethod": "POST",
+                "path": "evaluate",
+                "responseMode": "lastNode",
+                "options": {}
+            },
+            "id": "70429e50-1a52-46ff-9201-9459fab129ac",
+            "name": "Evaluate Submission Webhook",
+            "type": "n8n-nodes-base.webhook",
+            "typeVersion": 2.1,
+            "position": [
+                0,
+                400
+            ],
+            "webhookId": "432c9a3a-e3d9-41f2-ac44-c2bd720aad7b"
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "SELECT sa.id as answer_id, sa.question_id, sa.answer_text, q.question_text, q.question_type, q.context_used, q.model_answer, q.difficulty FROM student_answers sa JOIN questions q ON sa.question_id = q.id WHERE sa.submission_id = $1",
+                "options": {
+                    "queryReplacement": "={{ $json.body.submission_id }}"
+                }
+            },
+            "id": "55365e42-ec1f-41ce-b244-79db73aec215",
+            "name": "Fetch Student Answers",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                272,
+                400
+            ]
+        },
+        {
+            "parameters": {
+                "conditions": {
+                    "combinator": "and",
+                    "conditions": [
+                        {
+                            "leftValue": "={{ $json.question_type }}",
+                            "operator": {
+                                "type": "string",
+                                "operation": "equals"
+                            },
+                            "rightValue": "mcq"
+                        }
+                    ],
+                    "options": {
+                        "caseSensitive": true,
+                        "leftValue": "",
+                        "typeValidation": "strict",
+                        "version": 1
+                    }
+                },
+                "options": {}
+            },
+            "id": "e4430852-e13e-4b64-a139-10da46bf90a7",
+            "name": "Route by Question Type",
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 2.2,
+            "position": [
+                528,
+                400
+            ]
+        },
+        {
+            "parameters": {
+                "mode": "raw",
+                "jsonOutput": "={{ { \"answer_id\": $json.answer_id, \"question_id\": $json.question_id, \"question_type\": \"mcq\", \"score\": ($json.answer_text.trim().toLowerCase() === $json.model_answer.trim().toLowerCase() ? 1 : 0), \"max_score\": 1, \"feedback\": ($json.answer_text.trim().toLowerCase() === $json.model_answer.trim().toLowerCase() ? \"Correct answer.\" : \"Incorrect. Correct answer: \" + $json.model_answer), \"submission_id\": $(\"Evaluate Submission Webhook\").item.json.body.submission_id } }}",
+                "options": {}
+            },
+            "id": "45819f76-41d9-49f7-82fd-7bd53bbca315",
+            "name": "Score MCQ Answer",
+            "type": "n8n-nodes-base.set",
+            "typeVersion": 3.4,
+            "position": [
+                784,
+                208
+            ]
+        },
+        {
+            "parameters": {},
+            "id": "c451bc92-9ff4-4713-b70a-74c600441d3a",
+            "name": "Merge All Scores",
+            "type": "n8n-nodes-base.merge",
+            "typeVersion": 3.2,
+            "position": [
+                1568,
+                400
+            ]
+        },
+        {
+            "parameters": {
+                "mode": "raw",
+                "jsonOutput": "={{ { \"answer_id\": $json.answer_id, \"question_id\": $json.question_id, \"submission_id\": $(\"Evaluate Submission Webhook\").item.json.body.submission_id, \"question_type\": \"descriptive\", \"eval_prompt\": \"You are a fair exam evaluator. Score the student answer based ONLY on the provided context and model answer.\\n\\nQUESTION:\\n\" + $json.question_text + \"\\n\\nREFERENCE CONTEXT (from syllabus):\\n\" + $json.context_used + \"\\n\\nMODEL ANSWER:\\n\" + $json.model_answer + \"\\n\\nSTUDENT ANSWER:\\n\" + $json.answer_text + \"\\n\\nEvaluate on: Relevance (0-3), Coverage (0-3), Concept Clarity (0-4). Total = 10.\\nReturn ONLY valid JSON: { \\\"score\\\": 7, \\\"max_score\\\": 10, \\\"relevance\\\": 3, \\\"coverage\\\": 2, \\\"clarity\\\": 2, \\\"feedback\\\": \\\"Detailed feedback here...\\\" }\" } }}",
+                "options": {}
+            },
+            "id": "3d049a31-838b-4e3d-94aa-1296137cac20",
+            "name": "Build Evaluation Prompt",
+            "type": "n8n-nodes-base.set",
+            "typeVersion": 3.4,
+            "position": [
+                784,
+                608
+            ]
+        },
+        {
+            "parameters": {
+                "promptType": "define",
+                "text": "={{ $json.eval_prompt }}",
+                "batching": {}
+            },
+            "id": "edf18047-c968-4004-8aeb-9778d04629cc",
+            "name": "Evaluate Answer with Phi-3",
+            "type": "@n8n/n8n-nodes-langchain.chainLlm",
+            "typeVersion": 1.9,
+            "position": [
+                1040,
+                608
+            ]
+        },
+        {
+            "parameters": {
+                "model": "phi3:mini",
+                "options": {
+                    "temperature": 0.1,
+                    "numCtx": 4096,
+                    "format": "json"
+                }
+            },
+            "id": "f54b9b72-31d4-4c76-9941-dc6a7bd6e4a7",
+            "name": "Ollama Phi-3 (Evaluator)",
+            "type": "@n8n/n8n-nodes-langchain.lmChatOllama",
+            "typeVersion": 1,
+            "position": [
+                1040,
+                832
+            ]
+        },
+        {
+            "parameters": {
+                "mode": "runOnceForEachItem",
+                "jsCode": "const raw = item.json.text || '';\nlet eval_result;\ntry {\n  const clean = raw.replace(/```json|```/g, '').trim();\n  eval_result = JSON.parse(clean);\n} catch(e) {\n  eval_result = { score: 0, max_score: 10, feedback: 'Evaluation parsing failed.' };\n}\nreturn { json: { answer_id: item.json.answer_id, question_id: item.json.question_id, question_type: 'descriptive', score: eval_result.score || 0, max_score: eval_result.max_score || 10, feedback: eval_result.feedback || '', submission_id: item.json.submission_id } };"
+            },
+            "id": "e2204090-4d4c-443a-9309-43f7f8812e4e",
+            "name": "Parse Evaluation Result",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1312,
+                608
+            ]
+        },
+        {
+            "parameters": {
+                "aggregate": "aggregateAllItemData",
+                "destinationFieldName": "evaluations",
+                "options": {}
+            },
+            "id": "00f76160-e466-4053-ab76-9bca23026396",
+            "name": "Aggregate All Scores",
+            "type": "n8n-nodes-base.aggregate",
+            "typeVersion": 1,
+            "position": [
+                1824,
+                400
+            ]
+        },
+        {
+            "parameters": {
+                "jsCode": "const evals = items[0].json.evaluations || [];\nconst submission_id = evals[0]?.submission_id || '';\nconst total_score = evals.reduce((s, e) => s + (e.score || 0), 0);\nconst max_possible = evals.reduce((s, e) => s + (e.max_score || 0), 0);\nconst percentage = max_possible > 0 ? Math.round((total_score / max_possible) * 100) : 0;\nconst passed = percentage >= 50;\nreturn [{ json: { submission_id, total_score, max_possible, percentage, passed, evaluations: evals } }];"
+            },
+            "id": "9e15e7db-4f4a-4a3c-874e-ea1479ccbdb9",
+            "name": "Calculate Final Score",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                2080,
+                400
+            ],
+            "executeOnce": true
+        },
+        {
+            "parameters": {
+                "jsCode": "const evals = items[0].json.evaluations || [];\nreturn evals.map(e => ({ json: { answer_id: e.answer_id, question_id: e.question_id, score: e.score, max_score: e.max_score, feedback: e.feedback, submission_id: e.submission_id } }));"
+            },
+            "id": "9c62f577-bef3-4fc2-a28c-f74f5461fa6f",
+            "name": "Store Per-Answer Evaluations",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                2352,
+                304
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "INSERT INTO evaluations (submission_id, question_id, answer_id, score, max_score, feedback, evaluated_at) VALUES ($1, $2, $3, $4, $5, $6, NOW())",
+                "options": {
+                    "queryReplacement": "={{ [$json.submission_id, $json.question_id, $json.answer_id, $json.score, $json.max_score, $json.feedback] }}"
+                }
+            },
+            "id": "c7cb2b39-3a34-49a7-ad3f-ca943afda4da",
+            "name": "Insert Evaluations to DB",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                2608,
+                304
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "INSERT INTO exam_results (submission_id, total_score, max_possible, percentage, passed, evaluated_at) VALUES ($1, $2, $3, $4, $5, NOW()) ON CONFLICT (submission_id) DO UPDATE SET total_score=$2, max_possible=$3, percentage=$4, passed=$5, evaluated_at=NOW()",
+                "options": {
+                    "queryReplacement": "={{ [$(\"Calculate Final Score\").item.json.submission_id, $(\"Calculate Final Score\").item.json.total_score, $(\"Calculate Final Score\").item.json.max_possible, $(\"Calculate Final Score\").item.json.percentage, $(\"Calculate Final Score\").item.json.passed] }}"
+                }
+            },
+            "id": "37288e7a-08c0-410f-acdd-77646202f401",
+            "name": "Store Final Result",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                2864,
+                400
+            ]
+        },
+        {
+            "parameters": {
+                "mode": "raw",
+                "jsonOutput": "={{ { \"success\": true, \"submission_id\": $(\"Calculate Final Score\").item.json.submission_id, \"total_score\": $(\"Calculate Final Score\").item.json.total_score, \"max_possible\": $(\"Calculate Final Score\").item.json.max_possible, \"percentage\": $(\"Calculate Final Score\").item.json.percentage, \"passed\": $(\"Calculate Final Score\").item.json.passed } }}",
+                "options": {}
+            },
+            "id": "36d1622c-eb80-43c7-be5f-3505c1a507ec",
+            "name": "Return Evaluation Response",
+            "type": "n8n-nodes-base.set",
+            "typeVersion": 3.4,
+            "position": [
+                3120,
+                400
+            ],
+            "executeOnce": true
+        },
+        {
+            "parameters": {
+                "httpMethod": "POST",
+                "path": "evaluate-answer",
+                "responseMode": "lastNode",
+                "options": {}
+            },
+            "id": "482de5f2-c04d-410a-8ea1-e91505cfe76f",
+            "name": "Evaluate Answer Webhook",
+            "type": "n8n-nodes-base.webhook",
+            "typeVersion": 2.1,
+            "position": [
+                0,
+                704
+            ],
+            "webhookId": "ec61967e-a2b1-4c00-980a-ade9e634875d"
+        },
+        {
+            "parameters": {
+                "mode": "raw",
+                "jsonOutput": "={{ { \"answer_id\": $json.body.answer_id, \"question_id\": $json.body.question_id, \"question_type\": $json.body.question_type, \"eval_prompt\": \"You are a fair exam evaluator. Score the student answer based ONLY on the provided context and model answer.\\n\\nQUESTION:\\n\" + $json.body.question_text + \"\\n\\nREFERENCE CONTEXT (from syllabus):\\n\" + $json.body.context_used + \"\\n\\nMODEL ANSWER:\\n\" + $json.body.model_answer + \"\\n\\nSTUDENT ANSWER:\\n\" + $json.body.answer_text + \"\\n\\nEvaluate on: Relevance (0-3), Coverage (0-3), Concept Clarity (0-4). Total = 10.\\nReturn ONLY valid JSON: { \\\"score\\\": 7, \\\"max_score\\\": 10, \\\"relevance\\\": 3, \\\"coverage\\\": 2, \\\"clarity\\\": 2, \\\"feedback\\\": \\\"Detailed feedback here...\\\" }\" } }}",
+                "options": {}
+            },
+            "id": "4340a9ff-e59b-4454-b634-17631558b91b",
+            "name": "Build Single Answer Prompt",
+            "type": "n8n-nodes-base.set",
+            "typeVersion": 3.4,
+            "position": [
+                272,
+                704
+            ]
+        },
+        {
+            "parameters": {
+                "promptType": "define",
+                "text": "={{ $json.eval_prompt }}",
+                "batching": {}
+            },
+            "id": "e74476b4-4f7d-4ee2-8821-fb5af7176a85",
+            "name": "Evaluate Single Answer with Phi-3",
+            "type": "@n8n/n8n-nodes-langchain.chainLlm",
+            "typeVersion": 1.9,
+            "position": [
+                528,
+                704
+            ]
+        },
+        {
+            "parameters": {
+                "model": "phi3:mini",
+                "options": {
+                    "temperature": 0.1,
+                    "numCtx": 4096,
+                    "format": "json"
+                }
+            },
+            "id": "b9a7f2aa-ab65-42ac-b9bf-8aa2f0a424bf",
+            "name": "Ollama Phi-3 (Single)",
+            "type": "@n8n/n8n-nodes-langchain.lmChatOllama",
+            "typeVersion": 1,
+            "position": [
+                528,
+                912
+            ]
+        },
+        {
+            "parameters": {
+                "mode": "runOnceForEachItem",
+                "jsCode": "const raw = item.json.text || '';\nlet eval_result;\ntry {\n  const clean = raw.replace(/```json|```/g, '').trim();\n  eval_result = JSON.parse(clean);\n} catch(e) {\n  eval_result = { score: 0, max_score: 10, feedback: 'Evaluation parsing failed.' };\n}\nreturn { json: { success: true, answer_id: item.json.answer_id, question_id: item.json.question_id, question_type: item.json.question_type || 'descriptive', score: eval_result.score || 0, max_score: eval_result.max_score || 10, relevance: eval_result.relevance || 0, coverage: eval_result.coverage || 0, clarity: eval_result.clarity || 0, feedback: eval_result.feedback || '' } };"
+            },
+            "id": "2f63eda7-d3a9-4098-b170-c02bb5803f25",
+            "name": "Parse Single Evaluation Result",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                784,
+                704
+            ]
+        }
+    ],
+    "pinData": {},
+    "connections": {
+        "Evaluate Submission Webhook": {
+            "main": [
+                [
+                    {
+                        "node": "Fetch Student Answers",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Fetch Student Answers": {
+            "main": [
+                [
+                    {
+                        "node": "Route by Question Type",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Route by Question Type": {
+            "main": [
+                [
+                    {
+                        "node": "Score MCQ Answer",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Build Evaluation Prompt",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Score MCQ Answer": {
+            "main": [
+                [
+                    {
+                        "node": "Merge All Scores",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Merge All Scores": {
+            "main": [
+                [
+                    {
+                        "node": "Aggregate All Scores",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Build Evaluation Prompt": {
+            "main": [
+                [
+                    {
+                        "node": "Evaluate Answer with Phi-3",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Evaluate Answer with Phi-3": {
+            "main": [
+                [
+                    {
+                        "node": "Parse Evaluation Result",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Ollama Phi-3 (Evaluator)": {
+            "ai_languageModel": [
+                [
+                    {
+                        "node": "Evaluate Answer with Phi-3",
+                        "type": "ai_languageModel",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Parse Evaluation Result": {
+            "main": [
+                [
+                    {
+                        "node": "Merge All Scores",
+                        "type": "main",
+                        "index": 1
+                    }
+                ]
+            ]
+        },
+        "Aggregate All Scores": {
+            "main": [
+                [
+                    {
+                        "node": "Calculate Final Score",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Calculate Final Score": {
+            "main": [
+                [
+                    {
+                        "node": "Store Per-Answer Evaluations",
+                        "type": "main",
+                        "index": 0
+                    },
+                    {
+                        "node": "Store Final Result",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Store Per-Answer Evaluations": {
+            "main": [
+                [
+                    {
+                        "node": "Insert Evaluations to DB",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Store Final Result": {
+            "main": [
+                [
+                    {
+                        "node": "Return Evaluation Response",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Evaluate Answer Webhook": {
+            "main": [
+                [
+                    {
+                        "node": "Build Single Answer Prompt",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Build Single Answer Prompt": {
+            "main": [
+                [
+                    {
+                        "node": "Evaluate Single Answer with Phi-3",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Evaluate Single Answer with Phi-3": {
+            "main": [
+                [
+                    {
+                        "node": "Parse Single Evaluation Result",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Ollama Phi-3 (Single)": {
+            "ai_languageModel": [
+                [
+                    {
+                        "node": "Evaluate Single Answer with Phi-3",
+                        "type": "ai_languageModel",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "active": false,
+    "settings": {
+        "executionOrder": "v1",
+        "binaryMode": "separate",
+        "availableInMCP": true
+    },
+    "versionId": "18a83637-3198-4d81-8bc0-ca0e188b0e16",
+    "meta": {
+        "aiBuilderAssisted": true,
+        "instanceId": "1ae1984b2291928c0f6d7d15263f9a22c39e9517af15230af29a27a7251ad896"
+    },
+    "id": "xdWmrgoIvTQStUvV",
+    "tags": []
+}
